@@ -1,10 +1,19 @@
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     app_name: str = "AI Story Forge API"
-    debug: bool = True
+    # Safe default for deployments; enable explicitly for local debugging.
+    debug: bool = False
+
+    # Browser origins allowed to call the API. Override with a JSON list in .env.
+    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    cors_allow_credentials: bool = False
+
+    # Local upload storage. The API mount and storage service use this same path.
+    upload_root: str = "/tmp/ai-story-forge/uploads"
 
     # Database
     database_url: str = "postgresql+asyncpg://storyforge:storyforge@localhost:5432/storyforge"
