@@ -126,23 +126,37 @@ async def upload_images(
 
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
-    created = []
-    for file in files:
-        try:
-            url, original_name = await save_upload(file, folder_id)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+    # Bound the amount of work accepted in a single multipart request.
+    if len(files) > 10:
+        raise HTTPException(status_code=413, detail="Maximum 10 images per upload request")
 
-        image = Image(
-            folder_id=folder_id,
-            url=url,
-            filename=original_name,
-            tags=tag_list,
-        )
-        db.add(image)
-        await db.flush()
-        await db.refresh(image)
-        created.append(image)
+    created = []
+    saved_urls = []
+    try:
+        for file in files:
+            url, original_name = await save_upload(file, folder_id)
+            saved_urls.append(url)
+
+            image = Image(
+                folder_id=folder_id,
+                url=url,
+                filename=original_name,
+                tags=tag_list,
+            )
+            db.add(image)
+            await db.flush()
+            await db.refresh(image)
+            created.append(image)
+    except ValueError as e:
+        for saved_url in saved_urls:
+            delete_file(saved_url)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        # The request-scoped DB dependency rolls back on errors; keep filesystem
+        # state consistent when any later file or DB operation fails.
+        for saved_url in saved_urls:
+            delete_file(saved_url)
+        raise
 
     return created
 
