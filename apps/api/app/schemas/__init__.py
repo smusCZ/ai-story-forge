@@ -3,6 +3,7 @@ from app.schemas.character_anchor import CharacterAnchorCreate, CharacterAnchorU
 from app.schemas.story import GenreProfile, StoryCreate, StoryUpdate, StoryOut
 from app.schemas.image import ImageFolderCreate, ImageFolderOut, ImageOut, ImageUpdate
 from app.schemas.chapter import ChapterGenerateRequest, ChapterOut, ChapterUpdate
+from app.schemas.feedback import FeedbackCreate, FeedbackOut, FeedbackSummary
 
 __all__ = [
     "SeriesCreate", "SeriesUpdate", "SeriesOut",
@@ -10,4 +11,5 @@ __all__ = [
     "GenreProfile", "StoryCreate", "StoryUpdate", "StoryOut",
     "ImageFolderCreate", "ImageFolderOut", "ImageOut", "ImageUpdate",
     "ChapterGenerateRequest", "ChapterOut", "ChapterUpdate",
+    "FeedbackCreate", "FeedbackOut", "FeedbackSummary",
 ]

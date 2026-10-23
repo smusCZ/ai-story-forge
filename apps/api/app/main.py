@@ -3,14 +3,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.core.config import get_settings
-from app.routers import series, stories, images, chapters
+from app.routers import series, stories, images, chapters, feedback
 
 settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.4.0",
-    description="AI Story Forge API – Series, Character Anchors, Genre, Images, Story Generation Engine",
+    version="0.5.0",
+    description="AI Story Forge API – Series, Character Anchors, Genre, Images, Generation, Feedback Loop",
 )
 
 app.add_middleware(
@@ -29,8 +29,9 @@ app.include_router(series.router, prefix="/api/v1")
 app.include_router(stories.router, prefix="/api/v1")
 app.include_router(images.router, prefix="/api/v1")
 app.include_router(chapters.router, prefix="/api/v1")
+app.include_router(feedback.router, prefix="/api/v1")
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "ai-story-forge", "version": "0.4.0"}
+    return {"status": "ok", "service": "ai-story-forge", "version": "0.5.0"}
