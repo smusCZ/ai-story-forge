@@ -1,0 +1,492 @@
+From 080f1cbb970df566613ed7d1d4325a916e5dc976 Mon Sep 17 00:00:00 2001
+From: smusCZ <smusCZ@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 13:22:05 +0000
+Subject: [PATCH] fix(api): field aliases, chapter numbering race, engagement
+ dilution, upload hardening
+
+- accept title/name and genre.main/genre.primary aliases on story create+update
+- UNIQUE NULLS NOT DISTINCT on (story_id, chapter_number, branch_id) + retry loop:
+  NULL branch_id previously bypassed the constraint, allowing duplicate chapter
+  numbers under concurrent generation
+- story engagement averages only chapters that have feedback; fresh chapters no
+  longer drag the score to zero and trigger spurious agent rewrites
+- upload: streaming 1MB reads, 15MB limit, magic-header validation, no orphan
+  files on multi-upload failure
+- CORS origins from CORS_ORIGINS env (credentials only for explicit list), DEBUG
+  defaults to false
+- LLM failures return clean 502 with actionable detail instead of 500
+- README: corrected request examples and full curl flow; .env.example updated
+---
+ .env.example                              |  6 +++
+ README.md                                 | 53 +++++++++++++++++++++---
+ apps/api/app/core/config.py               | 20 ++++++++-
+ apps/api/app/main.py                      |  7 +--
+ apps/api/app/models/chapter.py            |  8 +++-
+ apps/api/app/routers/agent.py            | 15 ++++++-
+ apps/api/app/routers/chapters.py         | 15 ++++++-
+ apps/api/app/routers/images.py           |  17 +++++---
+ apps/api/app/schemas/story.py             | 31 +++++++++++--
+ apps/api/app/services/feedback_service.py | 10 ++++-
+ apps/api/app/services/storage.py          | 40 +++++++++++++++--
+ apps/api/app/services/story_generator.py | 21 ++++++++-
+ packages/db/schema.sql                    |  2 +-
+ 13 files changed, 213 insertions(+), 32 deletions(-)
+
+diff --git a/.env.example b/.env.example
+index bcd3660..a68a1ad 100644
+--- a/.env.example
++++ b/.env.example
+@@ -21,4 +21,10 @@ LLM_MODEL=gpt-4o-mini
+ UPLOAD_ROOT=/tmp/ai-story-forge/uploads
+ 
+ # App
++# Zapni jen pro lokální vývoj (SQLAlchemy logy, verbose chyby)
+ DEBUG=true
++
++# CORS – čárkou oddělený seznam povolených originů.
++# Explicitní seznam povolí i credentials; "*" nebo prázdné = všechny originy bez credentials.
++# CORS_ORIGINS=http://localhost:3000,https://moje-app.cz
++CORS_ORIGINS=
+diff --git a/README.md b/README.md
+index d4c118f..821f702 100644
+--- a/README.md
++++ b/README.md
+@@ -33,13 +33,52 @@ API docs: **http://localhost:8000/docs**
+ 
+ ## Typický flow
+ 
+-1. `POST /api/v1/series` → vytvoř sérii
+-2. `POST /api/v1/series/{id}/characters` → přidej Character Anchors
+-3. `POST /api/v1/stories` → vytvoř příběh (povinný genre + series_id)
+-4. `POST /api/v1/images/folders` + upload → inspirace
+-5. `POST /api/v1/stories/{id}/chapters/generate` → první kapitola
+-6. Publikum dává feedback → `POST /api/v1/chapters/{id}/feedback`
+-7. `POST /api/v1/agent/trigger/{story_id}` → Agent Continuator rozhodne a pokračuje
++```bash
++# 1. Vytvoř sérii
++curl -X POST http://localhost:8000/api/v1/series \
++  -H 'Content-Type: application/json' \
++  -d '{"name": "Moje série", "description": "Hlavní série postav"}'
++
++# 2. Přidej Character Anchor (vždy vázaný na sérii)
++curl -X POST http://localhost:8000/api/v1/series/{series_id}/characters \
++  -H 'Content-Type: application/json' \
++  -d '{"name": "Elena", "role": "hero", "appearance_text": "vysoká, tmavé vlasy", "personality": {"traits": ["odvážná"]}, "backstory": "bývalá detektivka"}'
++
++# 3. Vytvoř příběh – povinné: title + series_id + genre.main + genre.tone
++curl -X POST http://localhost:8000/api/v1/stories \
++  -H 'Content-Type: application/json' \
++  -d '{"title": "Stíny nad městem", "series_id": "{series_id}", "genre": {"main": "mystery", "tone": "dark"}}'
++# Pozn.: pole title lze poslat i jako "name" a genre.main jako "primary" (aliasy pro kompatibilitu).
++
++# 4. Složka inspirace + upload obrázků
++curl -X POST http://localhost:8000/api/v1/images/folders \
++  -H 'Content-Type: application/json' \
++  -d '{"name": "Inspirace", "series_id": "{series_id}"}'
++curl -X POST http://localhost:8000/api/v1/images/folders/{folder_id}/upload \
++  -F 'files=@obrazek.jpg' -F 'tags=night,city'
++
++# 5. Vygeneruj první kapitolu
++curl -X POST http://localhost:8000/api/v1/stories/{story_id}/chapters/generate \
++  -H 'Content-Type: application/json' -d '{}'
++# volitelně: {"instruction": "Zaměř se na retrospektivu", "use_inspiration": true}
++
++# 6. Feedback publika – typ: like | dislike | comment | emoji | time_spent
++curl -X POST http://localhost:8000/api/v1/chapters/{chapter_id}/feedback \
++  -H 'Content-Type: application/json' \
++  -d '{"type": "like"}'
++curl -X POST http://localhost:8000/api/v1/chapters/{chapter_id}/feedback \
++  -H 'Content-Type: application/json' \
++  -d '{"type": "comment", "content": "Super napínavé!"}'
++curl -X POST http://localhost:8000/api/v1/chapters/{chapter_id}/feedback \
++  -H 'Content-Type: application/json' \
++  -d '{"type": "time_spent", "content": "120"}'
++
++# 7. Agent Continuator rozhodne a pokračuje
++curl -X POST http://localhost:8000/api/v1/agent/trigger/{story_id} \
++  -H 'Content-Type: application/json' -d '{}'
++# nebo vynuť akci: {"force_action": "rewrite"}
++# Pouze doporučení bez generování: GET /api/v1/agent/recommend/{story_id}
++```
+ 
+ ## Agent Continuator – akce
+ 
+diff --git a/apps/api/app/core/config.py b/apps/api/app/core/config.py
+index 6f853d9..5bc6365 100644
+--- a/apps/api/app/core/config.py
++++ b/apps/api/app/core/config.py
+@@ -4,7 +4,12 @@ from functools import lru_cache
+ 
+ class Settings(BaseSettings):
+     app_name: str = "AI Story Forge API"
+-    debug: bool = True
++    # Bezpečný default – explicitně zapnout v .env pro vývoj (DEBUG=true)
++    debug: bool = False
++
++    # CORS: čárkou oddělený seznam povolených originů (např. http://localhost:3000,https://moje-app.cz)
++    # Prázdné nebo "*" povolí všechny originy, ale bez credentials (bezpečné pro veřejné read-only API).
++    cors_origins: str = ""
+ 
+     # Database
+     database_url: str = "postgresql+asyncpg://storyforge:storyforge@localhost:5432/storyforge"
+@@ -25,3 +30,16 @@ class Settings(BaseSettings):
+ @lru_cache
+ def get_settings() -> Settings:
+     return Settings()
++
++
++def get_cors_config() -> tuple[list[str], bool]:
++    """
++    Vrátí (allow_origins, allow_credentials).
++    - explicitní seznam originů → credentials povoleny
++    - "*" / prázdné → všechny originy, ale bez credentials (jinak by prohlížeče blokovaly odpověď)
++    """
++    raw = (get_settings().cors_origins or "").strip()
++    if raw and raw != "*":
++        origins = [o.strip() for o in raw.split(",") if o.strip()]
++        return origins, True
++    return ["*"], False
+diff --git a/apps/api/app/main.py b/apps/api/app/main.py
+index eb771c6..a9b88ef 100644
+--- a/apps/api/app/main.py
++++ b/apps/api/app/main.py
+@@ -2,7 +2,7 @@ from pathlib import Path
+ from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.staticfiles import StaticFiles
+-from app.core.config import get_settings
++from app.core.config import get_settings, get_cors_config
+ from app.routers import series, stories, images, chapters, feedback, agent
+ 
+ settings = get_settings()
+@@ -13,10 +13,11 @@ app = FastAPI(
+     description="AI Story Forge API – Full pipeline including Agent Continuator",
+ )
+ 
++allow_origins, allow_credentials = get_cors_config()
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=["*"],
+-    allow_credentials=True,
++    allow_origins=allow_origins,
++    allow_credentials=allow_credentials,
+     allow_methods=["*"],
+     allow_headers=["*"],
+ )
+diff --git a/apps/api/app/models/chapter.py b/apps/api/app/models/chapter.py
+index 29cf66e..a9371e6 100644
+--- a/apps/api/app/models/chapter.py
++++ b/apps/api/app/models/chapter.py
+@@ -9,7 +9,13 @@ from app.core.database import Base
+ class Chapter(Base):
+     __tablename__ = "chapters"
+     __table_args__ = (
+-        UniqueConstraint("story_id", "chapter_number", "branch_id", name="uq_chapter_number_per_story"),
++        # NULLS NOT DISTINCT: jinak by NULL branch_id obcházel constraint
++        # (Postgres v unique klíči NULL != NULL) a vznikaly duplicitní čísla kapitol.
++        UniqueConstraint(
++            "story_id", "chapter_number", "branch_id",
++            name="uq_chapter_number_per_story",
++            postgresql_nulls_not_distinct=True,
++        ),
+     )
+ 
+     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+diff --git a/apps/api/app/routers/agent.py b/apps/api/app/routers/agent.py
+index 905c03d..3269fc3 100644
+--- a/apps/api/app/routers/agent.py
++++ b/apps/api/app/routers/agent.py
+@@ -1,4 +1,5 @@
+ from uuid import UUID
++import httpx
+ from fastapi import APIRouter, Depends, HTTPException, status
+ from sqlalchemy.ext.asyncio import AsyncSession
+ from sqlalchemy import select
+@@ -24,8 +25,18 @@ async def trigger_agent(
+ 
+     try:
+         outcome = await run_agent(db, story_id, force_action=payload.force_action)
+-    except Exception as e:
+-        raise HTTPException(status_code=500, detail=f"Agent failed: {str(e)}")
++    except ValueError as e:
++        raise HTTPException(status_code=404, detail=str(e))
++    except httpx.HTTPError as e:
++        raise HTTPException(
++            status_code=status.HTTP_502_BAD_GATEWAY,
++            detail=f"LLM provider unavailable: {type(e).__name__}. Check LLM_BASE_URL / LLM_API_KEY.",
++        )
++    except KeyError as e:
++        raise HTTPException(
++            status_code=status.HTTP_502_BAD_GATEWAY,
++            detail=f"Unexpected LLM response format (missing {e}). Check LLM_MODEL compatibility.",
++        )
+ 
+     return outcome
+ 
+diff --git a/apps/api/app/routers/chapters.py b/apps/api/app/routers/chapters.py
+index 8dedc0a..7dc8500 100644
+--- a/apps/api/app/routers/chapters.py
++++ b/apps/api/app/routers/chapters.py
+@@ -1,4 +1,5 @@
+ from uuid import UUID
++import httpx
+ from fastapi import APIRouter, Depends, HTTPException, status
+ from sqlalchemy.ext.asyncio import AsyncSession
+ from sqlalchemy import select
+@@ -29,8 +30,18 @@ async def generate_next_chapter(
+             user_instruction=payload.instruction,
+             use_inspiration=payload.use_inspiration,
+         )
+-    except Exception as e:
+-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
++    except ValueError as e:
++        raise HTTPException(status_code=404, detail=str(e))
++    except httpx.HTTPError as e:
++        raise HTTPException(
++            status_code=status.HTTP_502_BAD_GATEWAY,
++            detail=f"LLM provider unavailable: {type(e).__name__}. Check LLM_BASE_URL / LLM_API_KEY.",
++        )
++    except KeyError as e:
++        raise HTTPException(
++            status_code=status.HTTP_502_BAD_GATEWAY,
++            detail=f"Unexpected LLM response format (missing {e}). Check LLM_MODEL compatibility.",
++        )
+ 
+     return chapter
+ 
+diff --git a/apps/api/app/routers/images.py b/apps/api/app/routers/images.py
+index 3473b42..c4349b5 100644
+--- a/apps/api/app/routers/images.py
++++ b/apps/api/app/routers/images.py
+@@ -126,13 +126,20 @@ async def upload_images(
+ 
+     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+ 
+-    created = []
+-    for file in files:
+-        try:
++    # Nejdřív uložíme všechny soubory na disk; až pak vytvoříme DB záznamy.
++    # Když jeden soubor selže, žádný částečný upload nezůstane.
++    saved = []
++    try:
++        for file in files:
+             url, original_name = await save_upload(file, folder_id)
+-        except ValueError as e:
+-            raise HTTPException(status_code=400, detail=str(e))
++            saved.append((url, original_name))
++    except ValueError as e:
++        for url, _ in saved:
++            delete_file(url)
++        raise HTTPException(status_code=400, detail=str(e))
+ 
++    created = []
++    for url, original_name in saved:
+         image = Image(
+             folder_id=folder_id,
+             url=url,
+diff --git a/apps/api/app/schemas/story.py b/apps/api/app/schemas/story.py
+index 3440c7c..a7e5cfc 100644
+--- a/apps/api/app/schemas/story.py
++++ b/apps/api/app/schemas/story.py
+@@ -1,4 +1,4 @@
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, ConfigDict, Field, AliasChoices
+ from uuid import UUID
+ from datetime import datetime
+ from typing import Optional, Any
+@@ -6,7 +6,15 @@ from typing import Optional, Any
+ 
+ class GenreProfile(BaseModel):
+     """Povinný žánrový profil příběhu – AI z něj vychází při generování i pokračováních."""
+-    main: str = Field(..., min_length=1, description="Hlavní žánr (např. anime isekai, dark fantasy, hard sci-fi)")
++    # Alias "primary" zachovává zpětnou kompatibilitu se staršími příklady v README.
++    model_config = ConfigDict(populate_by_name=True)
++
++    main: str = Field(
++        ...,
++        validation_alias=AliasChoices("main", "primary"),
++        min_length=1,
++        description="Hlavní žánr (např. anime isekai, dark fantasy, hard sci-fi)",
++    )
+     secondary: list[str] = Field(default_factory=list, description="Sekundární žánry / subžánry")
+     tone: str = Field(..., min_length=1, description="Tón (dark, light, melancholický, humoristický, epický...)")
+     tempo: str = Field(default="medium", description="Tempo vyprávění (slow, medium, fast)")
+@@ -16,14 +24,29 @@ class GenreProfile(BaseModel):
+ 
+ 
+ class StoryCreate(BaseModel):
++    model_config = ConfigDict(populate_by_name=True)
++
+     series_id: UUID = Field(..., description="Povinné – příběh patří do konkrétní série")
+-    title: str = Field(..., min_length=1, max_length=500)
++    # Alias "name" zachovává zpětnou kompatibilitu se staršími příklady v README.
++    title: str = Field(
++        ...,
++        validation_alias=AliasChoices("title", "name"),
++        min_length=1,
++        max_length=500,
++    )
+     genre: GenreProfile
+     settings: dict[str, Any] = Field(default_factory=dict)
+ 
+ 
+ class StoryUpdate(BaseModel):
+-    title: Optional[str] = Field(None, min_length=1, max_length=500)
++    model_config = ConfigDict(populate_by_name=True)
++
++    title: Optional[str] = Field(
++        None,
++        validation_alias=AliasChoices("title", "name"),
++        min_length=1,
++        max_length=500,
++    )
+     status: Optional[str] = Field(None, pattern="^(draft|active|paused|completed)$")
+     genre: Optional[GenreProfile] = None
+     settings: Optional[dict[str, Any]] = None
+diff --git a/apps/api/app/services/feedback_service.py b/apps/api/app/services/feedback_service.py
+index 10c5697..c7a0d03 100644
+--- a/apps/api/app/services/feedback_service.py
++++ b/apps/api/app/services/feedback_service.py
+@@ -64,6 +64,12 @@ async def compute_chapter_summary(db: AsyncSession, chapter_id: UUID) -> Feedbac
+ 
+ 
+ async def update_story_engagement(db: AsyncSession, story_id: UUID) -> float:
++    """
++    Průměrný engagement přes kapitoly, které už mají nějaký feedback.
++    Čerstvě vygenerované kapitoly bez reakcí se do průměru NEPOČÍTAJÍ –
++    nemají měřený engagement nula, ale neznámý. Jinak by každá nová kapitola
++    falešně stahovala skóre a agent kvůli tomu zbytečně přepisoval.
++    """
+     chapters = (await db.execute(select(Chapter.id).where(Chapter.story_id == story_id))).scalars().all()
+     if not chapters:
+         return 0.0
+@@ -71,7 +77,9 @@ async def update_story_engagement(db: AsyncSession, story_id: UUID) -> float:
+     scores = []
+     for ch_id in chapters:
+         summary = await compute_chapter_summary(db, ch_id)
+-        scores.append(summary.engagement_score)
++        total_reactions = summary.likes + summary.dislikes + summary.comments + summary.emojis
++        if total_reactions > 0:
++            scores.append(summary.engagement_score)
+ 
+     avg = round(sum(scores) / len(scores), 3) if scores else 0.0
+ 
+diff --git a/apps/api/app/services/storage.py b/apps/api/app/services/storage.py
+index 4e4fb99..8578c53 100644
+--- a/apps/api/app/services/storage.py
++++ b/apps/api/app/services/storage.py
+@@ -13,6 +13,15 @@ UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+ 
+ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+ MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB
++CHUNK_SIZE = 1024 * 1024  # 1 MB – čteme proudově, nenačítáme celý soubor do paměti
++
++# Magické hlavičky běžných obrázkových formátů
++_MAGIC_SIGNATURES = (
++    b"\xff\xd8\xff",       # jpg
++    b"\x89PNG\r\n\x1a\n",  # png
++    b"GIF87a", b"GIF89a",  # gif
++    b"BM",                 # bmp
++)
+ 
+ 
+ def _safe_ext(filename: str) -> str:
+@@ -22,24 +31,47 @@ def _safe_ext(filename: str) -> str:
+     return ext
+ 
+ 
++def _looks_like_image(head: bytes) -> bool:
++    """Základní validace obsahu – přípona sama o sobě není důvěryhodná."""
++    return any(head.startswith(sig) for sig in _MAGIC_SIGNATURES) or head[:4] == b"RIFF"
++
++
+ async def save_upload(file: UploadFile, folder_id: uuid.UUID) -> tuple[str, str]:
+     """
+     Saves uploaded file and returns (public_url, original_filename).
++    Proudové čtení po 1 MB – soubor nad limit nikdy nenačteme celý do paměti.
+     """
+     if not file.filename:
+         raise ValueError("Filename is required")
+ 
+     ext = _safe_ext(file.filename)
+-    content = await file.read()
+-    if len(content) > MAX_FILE_SIZE:
+-        raise ValueError(f"File too large (max {MAX_FILE_SIZE // 1024 // 1024} MB)")
+ 
+     folder_path = UPLOAD_ROOT / str(folder_id)
+     folder_path.mkdir(parents=True, exist_ok=True)
+ 
+     new_name = f"{uuid.uuid4().hex}{ext}"
+     dest = folder_path / new_name
+-    dest.write_bytes(content)
++
++    size = 0
++    head = b""
++    with dest.open("wb") as out:
++        while chunk := await file.read(CHUNK_SIZE):
++            if not head:
++                head = chunk[:16]
++            size += len(chunk)
++            if size > MAX_FILE_SIZE:
++                out.close()
++                dest.unlink(missing_ok=True)
++                raise ValueError(f"File too large (max {MAX_FILE_SIZE // 1024 // 1024} MB)")
++            out.write(chunk)
++
++    if size == 0:
++        dest.unlink(missing_ok=True)
++        raise ValueError("Empty file")
++
++    if not _looks_like_image(head):
++        dest.unlink(missing_ok=True)
++        raise ValueError("File content is not a supported image (jpg/png/webp/gif/bmp)")
+ 
+     public_url = f"/uploads/{folder_id}/{new_name}"
+     return public_url, file.filename
+diff --git a/apps/api/app/services/story_generator.py b/apps/api/app/services/story_generator.py
+index 6ca9b2f..b231fc3 100644
+--- a/apps/api/app/services/story_generator.py
++++ b/apps/api/app/services/story_generator.py
+@@ -171,6 +171,25 @@ HOOKS:
+         parent_chapter_id=prev_chapters[-1].id if prev_chapters else None,
+     )
+     db.add(chapter)
+-    await db.flush()
++
++    # Souběžné generování může způsobit duplicitu chapter_number (unique constraint).
++    # Po selhání spočítáme číslo znovu a zkusíme to ještě jednou.
++    from sqlalchemy.exc import IntegrityError
++    for _attempt in range(3):
++        try:
++            await db.flush()
++            break
++        except IntegrityError:
++            await db.rollback()
++            latest = await db.execute(
++                select(Chapter.chapter_number)
++                .where(Chapter.story_id == story_id)
++                .order_by(Chapter.chapter_number.desc())
++                .limit(1)
++            )
++            latest_num = latest.scalar_one_or_none()
++            chapter.chapter_number = (latest_num or 0) + 1
++            db.add(chapter)
++
+     await db.refresh(chapter)
+     return chapter
+diff --git a/packages/db/schema.sql b/packages/db/schema.sql
+index c682b0d..f61aeaa 100644
+--- a/packages/db/schema.sql
++++ b/packages/db/schema.sql
+@@ -76,7 +76,7 @@ CREATE TABLE chapters (
+     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ 
+-    CONSTRAINT uq_chapter_number_per_story UNIQUE (story_id, chapter_number, branch_id)
++    CONSTRAINT uq_chapter_number_per_story UNIQUE NULLS NOT DISTINCT (story_id, chapter_number, branch_id)
+ );
+ 
+ CREATE INDEX idx_chapters_story ON chapters(story_id);
+-- 
+2.39.5
+
