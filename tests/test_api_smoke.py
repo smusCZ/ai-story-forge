@@ -82,14 +82,14 @@ def test_save_upload_streams_valid_image(tmp_path, monkeypatch):
 
     monkeypatch.setattr(storage, "UPLOAD_ROOT", tmp_path)
     folder_id = uuid.uuid4()
-    upload = ChunkedUpload("reference.png", b"\\x89PNG\\r\\n\\x1a\\nimage-data")
+    upload = ChunkedUpload("reference.png", b"\x89PNG\r\n\x1a\nimage-data")
 
     url, original_name = asyncio.run(storage.save_upload(upload, folder_id))
 
     saved_file = tmp_path / str(folder_id) / url.rsplit("/", 1)[1]
     assert original_name == "reference.png"
     assert url.startswith(f"/uploads/{folder_id}/")
-    assert saved_file.read_bytes() == b"\\x89PNG\\r\\n\\x1a\\nimage-data"
+    assert saved_file.read_bytes() == b"\x89PNG\r\n\x1a\nimage-data"
     assert not list(saved_file.parent.glob("*.part"))
 
 
@@ -115,7 +115,7 @@ def test_save_upload_enforces_size_limit_while_streaming(tmp_path, monkeypatch):
 
     monkeypatch.setattr(storage, "UPLOAD_ROOT", tmp_path)
     monkeypatch.setattr(storage, "MAX_FILE_SIZE", 8)
-    upload = ChunkedUpload("oversized.png", b"\\x89PNG\\r\\n\\x1a\\nX")
+    upload = ChunkedUpload("oversized.png", b"\x89PNG\r\n\x1a\nX")
 
     with pytest.raises(ValueError, match="File too large"):
         asyncio.run(storage.save_upload(upload, uuid.uuid4()))
