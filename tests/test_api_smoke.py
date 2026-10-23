@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
@@ -44,7 +46,7 @@ def test_safe_cors_defaults_are_applied():
 def test_upload_mount_and_storage_use_same_root():
     upload_mount = next(route for route in app.routes if getattr(route, "name", None) == "uploads")
 
-    assert storage.UPLOAD_ROOT.resolve() == __import__("pathlib").Path(upload_mount.directory).resolve()
+    assert storage.UPLOAD_ROOT.resolve() == Path(upload_mount.directory).resolve()
 
 
 def test_delete_file_rejects_paths_outside_upload_root(tmp_path, monkeypatch):
