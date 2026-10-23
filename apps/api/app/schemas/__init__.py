@@ -4,6 +4,7 @@ from app.schemas.story import GenreProfile, StoryCreate, StoryUpdate, StoryOut
 from app.schemas.image import ImageFolderCreate, ImageFolderOut, ImageOut, ImageUpdate
 from app.schemas.chapter import ChapterGenerateRequest, ChapterOut, ChapterUpdate
 from app.schemas.feedback import FeedbackCreate, FeedbackOut, FeedbackSummary
+from app.schemas.agent import AgentTriggerRequest, AgentRunOut, AgentRunHistoryItem
 
 __all__ = [
     "SeriesCreate", "SeriesUpdate", "SeriesOut",
@@ -12,4 +13,5 @@ __all__ = [
     "ImageFolderCreate", "ImageFolderOut", "ImageOut", "ImageUpdate",
     "ChapterGenerateRequest", "ChapterOut", "ChapterUpdate",
     "FeedbackCreate", "FeedbackOut", "FeedbackSummary",
+    "AgentTriggerRequest", "AgentRunOut", "AgentRunHistoryItem",
 ]
