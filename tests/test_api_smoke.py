@@ -39,7 +39,7 @@ def test_safe_cors_defaults_are_applied():
         "http://127.0.0.1:3000",
     ]
     assert cors.kwargs["allow_credentials"] is False
-    assert "*" not in cors.options["allow_origins"]
+    assert "*" not in cors.kwargs["allow_origins"]
     assert app.debug is False
 
 
