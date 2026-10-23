@@ -60,3 +60,64 @@ def test_delete_file_rejects_paths_outside_upload_root(tmp_path, monkeypatch):
 
     assert outside_file.exists()
     assert outside_file.read_text(encoding="utf-8") == "keep me"
+
+
+class ChunkedUpload:
+    def __init__(self, filename, content):
+        self.filename = filename
+        self.content = content
+        self.offset = 0
+
+    async def read(self, size=-1):
+        if size < 0:
+            size = len(self.content)
+        chunk = self.content[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+def test_save_upload_streams_valid_image(tmp_path, monkeypatch):
+    import asyncio
+    import uuid
+
+    monkeypatch.setattr(storage, "UPLOAD_ROOT", tmp_path)
+    folder_id = uuid.uuid4()
+    upload = ChunkedUpload("reference.png", b"\\x89PNG\\r\\n\\x1a\\nimage-data")
+
+    url, original_name = asyncio.run(storage.save_upload(upload, folder_id))
+
+    saved_file = tmp_path / str(folder_id) / url.rsplit("/", 1)[1]
+    assert original_name == "reference.png"
+    assert url.startswith(f"/uploads/{folder_id}/")
+    assert saved_file.read_bytes() == b"\\x89PNG\\r\\n\\x1a\\nimage-data"
+    assert not list(saved_file.parent.glob("*.part"))
+
+
+def test_save_upload_rejects_mismatched_file_signature(tmp_path, monkeypatch):
+    import asyncio
+    import uuid
+    import pytest
+
+    monkeypatch.setattr(storage, "UPLOAD_ROOT", tmp_path)
+    upload = ChunkedUpload("not-really.png", b"this is not a PNG")
+
+    with pytest.raises(ValueError, match="does not match"):
+        asyncio.run(storage.save_upload(upload, uuid.uuid4()))
+
+    assert not list(tmp_path.rglob("*.png"))
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_save_upload_enforces_size_limit_while_streaming(tmp_path, monkeypatch):
+    import asyncio
+    import uuid
+    import pytest
+
+    monkeypatch.setattr(storage, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(storage, "MAX_FILE_SIZE", 8)
+    upload = ChunkedUpload("oversized.png", b"\\x89PNG\\r\\n\\x1a\\nX")
+
+    with pytest.raises(ValueError, match="File too large"):
+        asyncio.run(storage.save_upload(upload, uuid.uuid4()))
+
+    assert not list(tmp_path.rglob("*.part"))
