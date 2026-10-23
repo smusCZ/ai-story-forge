@@ -7,7 +7,7 @@ from app.core.database import get_db
 from app.models.story import Story
 from app.models.agent_run import AgentRun
 from app.schemas.agent import AgentTriggerRequest, AgentRunOut, AgentRunHistoryItem
-from app.services.agent_continuator import run_agent
+from app.services.agent_continuator import run_agent, _load_context, _decide
 
 router = APIRouter(prefix="/agent", tags=["Agent Continuator"])
 
@@ -39,3 +39,22 @@ async def list_agent_runs(story_id: UUID, limit: int = 20, db: AsyncSession = De
         .limit(min(limit, 50))
     )
     return result.scalars().all()
+
+
+@router.get("/recommend/{story_id}")
+async def recommend_action(story_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Pouze doporučí další akci bez generování."""
+    result = await db.execute(select(Story).where(Story.id == story_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Story not found")
+
+    context = await _load_context(db, story_id)
+    decision, reasoning = await _decide(context)
+
+    return {
+        "story_id": str(story_id),
+        "recommended_action": decision,
+        "reasoning": reasoning,
+        "engagement_score": context["engagement_score"],
+        "has_chapters": context["latest_chapter"] is not None,
+    }
