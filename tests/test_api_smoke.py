@@ -34,11 +34,11 @@ def test_openapi_schema_is_available():
 def test_safe_cors_defaults_are_applied():
     cors = next(middleware for middleware in app.user_middleware if middleware.cls is CORSMiddleware)
 
-    assert cors.options["allow_origins"] == [
+    assert cors.kwargs["allow_origins"] == [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
-    assert cors.options["allow_credentials"] is False
+    assert cors.kwargs["allow_credentials"] is False
     assert "*" not in cors.options["allow_origins"]
     assert app.debug is False
 
@@ -46,7 +46,7 @@ def test_safe_cors_defaults_are_applied():
 def test_upload_mount_and_storage_use_same_root():
     upload_mount = next(route for route in app.routes if getattr(route, "name", None) == "uploads")
 
-    assert storage.UPLOAD_ROOT.resolve() == Path(upload_mount.directory).resolve()
+    assert storage.UPLOAD_ROOT.resolve() == Path(upload_mount.app.directory).resolve()
 
 
 def test_delete_file_rejects_paths_outside_upload_root(tmp_path, monkeypatch):
