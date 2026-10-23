@@ -1,14 +1,16 @@
 """
 Image storage service.
-MVP: local filesystem under /uploads
-Production-ready: easily switchable to MinIO / S3 (already in docker-compose).
+MVP: local filesystem under /uploads.
+The API mount and this service share UPLOAD_ROOT from application settings.
 """
-import os
 import uuid
 from pathlib import Path
+
 from fastapi import UploadFile
 
-UPLOAD_ROOT = Path(os.getenv("UPLOAD_ROOT", "/tmp/ai-story-forge/uploads"))
+from app.core.config import get_settings
+
+UPLOAD_ROOT = Path(get_settings().upload_root).expanduser()
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
@@ -18,13 +20,16 @@ MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB
 def _safe_ext(filename: str) -> str:
     ext = Path(filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise ValueError(f"Unsupported file type: {ext}. Allowed: {ALLOWED_EXTENSIONS}")
+        raise ValueError(f"Unsupported file type: {ext}. Allowed: {sorted(ALLOWED_EXTENSIONS)}")
     return ext
 
 
 async def save_upload(file: UploadFile, folder_id: uuid.UUID) -> tuple[str, str]:
     """
-    Saves uploaded file and returns (public_url, original_filename).
+    Save an uploaded file and return (public_url, original_filename).
+
+    Note: this MVP validates extensions only. Content-signature validation and
+    streaming size enforcement remain separate hardening work.
     """
     if not file.filename:
         raise ValueError("Filename is required")
@@ -46,8 +51,10 @@ async def save_upload(file: UploadFile, folder_id: uuid.UUID) -> tuple[str, str]
 
 
 def delete_file(url: str) -> None:
-    """Best-effort delete of local file."""
+    """Best-effort delete of a file stored under the uploads URL prefix."""
     if url.startswith("/uploads/"):
-        path = UPLOAD_ROOT / url.replace("/uploads/", "", 1)
-        if path.exists():
+        relative_path = url.removeprefix("/uploads/")
+        path = (UPLOAD_ROOT / relative_path).resolve()
+        root = UPLOAD_ROOT.resolve()
+        if path != root and root in path.parents and path.exists():
             path.unlink(missing_ok=True)
